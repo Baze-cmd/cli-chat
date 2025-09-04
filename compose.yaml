@@ -1,0 +1,7 @@
+services:
+  chat:
+    build: .
+    container_name: stateless-llm-cli
+    ports:
+      - "6666:6666"
+    restart: unless-stopped

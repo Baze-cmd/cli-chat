@@ -1,0 +1,235 @@
+#!/bin/bash
+
+if [ "$#" -ne 2 ]
+then
+        echo "USAGE: `basename $0` <STATUS> <MONTH>"
+        exit 1
+fi
+
+if [[ ! "$2" =~ ^[0-9]{4}-[0-9]{2}$ ]]
+then
+        echo "Correct format is: YYYY-MM"
+        exit 1
+fi
+
+# prviot argument e status, vtor argument e datum
+# treba broj na logovi so toj status od toj mesec
+
+matchingLogs=`grep "^$2" system_logs.tsv | grep "$1" | wc -l`
+echo "Number of logs with status "$1" in month "$2":"$matchingLogs" "
+
+mostCommonIP=$(grep "$1" system_logs.tsv | awk '{print $NF;}' | sort | uniq -c | sort -nr | head -n 1 | awk '{print $2;}')
+echo "Most common IP adress for logs with status "$1": "$mostCommonIP" "
+
+counterDebug=`grep "^$2" system_logs.tsv | awk 'BEGIN {counterDebug=0;} {if($3=="DEBUG") {counterDebug++;} } END {print counterDebug;} '`
+counterInfo=`grep "^$2" system_logs.tsv | awk 'BEGIN {counterInfo=0;} {if($3=="INFO") {counterInfo++;} } END {print counterInfo;}' `
+counterWarn=`grep "^$2" system_logs.tsv | awk 'BEGIN {counterWarn=0} {if($3=="WARN") {counterWarn++;} } END {print counterWarn;}'`
+counterError=`grep "^$2" system_logs.tsv | awk 'BEGIN {counterError=0} {if($3=="ERROR") {counterError++;} } END {print counterError;}'`
+
+
+echo "Count per status for month "$2": "
+echo "DEBUG: "$counterDebug" "
+echo "INFO: "$counterInfo" "
+echo "WARN: "$counterWarn" "
+echo "ERROR: "$counterError" "
+
+import java.io.*;
+import java.net.Socket;
+import java.time.LocalDateTime;
+import java.util.List;
+import java.util.stream.Collectors;
+
+public class Worker extends Thread {
+
+    Socket clientSocket;
+    BufferedReader clientReader;
+    PrintWriter clientWriter;
+
+    Worker(Socket clientSocket) throws IOException {
+        this.clientSocket = clientSocket;
+        this.clientReader = new BufferedReader(new InputStreamReader(clientSocket.getInputStream()));
+        this.clientWriter = new PrintWriter(clientSocket.getOutputStream(), true);
+    }
+
+    private void terminateConnection() throws IOException {
+        this.clientSocket.close();
+        this.clientReader.close();
+        this.clientWriter.close();
+    }
+
+    private void writeDataToLogFile(String word, LocalDateTime currentDateTime, String ipAddress) throws IOException {
+        synchronized (Worker.class) {
+            PrintWriter logFileWriter = new PrintWriter(new FileWriter(System.getenv("WORDS_FILE"), true), true);
+            logFileWriter.println(word + "\t" + currentDateTime + "\t" + ipAddress);
+        }
+    }
+
+    private List<String> getKnownWords() {
+        synchronized (Worker.class) {
+            try {
+                BufferedReader logFileReader = new BufferedReader(new InputStreamReader(new FileInputStream(System.getenv("WORDS_FILE"))));
+                return logFileReader
+                        .lines()
+                        .map(line -> line.split("\\s+")[0])
+                        .collect(Collectors.toList());
+            } catch (IOException e) {
+                throw new RuntimeException("Error reading file", e);
+            }
+        }
+    }
+
+    @Override
+    public void run() {
+        try {
+            if (!clientReader.readLine().equals("HANDSHAKE"))
+                throw new RuntimeException("Client does not follow agreed contract for logging in.");
+        } catch (IOException e) {
+            throw new RuntimeException(e);
+        }
+
+        clientWriter.println("Logged In " + clientSocket.getInetAddress());
+
+        System.out.println("Waiting for client input.");
+        while (true) {
+
+            String wordFromClient;
+
+            try {
+                wordFromClient = clientReader.readLine();
+            } catch (IOException e) {
+                throw new RuntimeException("Could not read line from client reader.");
+            }
+
+            List<String> knownWords = getKnownWords();
+
+            if (wordFromClient.equalsIgnoreCase("STOP")) {
+
+                clientWriter.println(knownWords.size());
+                clientWriter.println("LOGGED OUT");
+
+                try {
+                    terminateConnection();
+                } catch (IOException e) {
+                    throw new RuntimeException(e);
+                }
+                break;
+            }
+
+
+            if (!knownWords.contains(wordFromClient)) {
+                try {
+                    writeDataToLogFile(wordFromClient, LocalDateTime.now(), String.valueOf(clientSocket.getInetAddress()));
+                } catch (IOException e) {
+                    throw new RuntimeException(e);
+                }
+                clientWriter.println("NEMA");
+            } else {
+                clientWriter.println("IMA");
+            }
+
+        }
+    }
+}
+
+import java.io.BufferedReader;
+import java.io.IOException;
+import java.io.InputStreamReader;
+import java.io.PrintWriter;
+import java.net.Socket;
+import java.util.Scanner;
+
+public class Client {
+    public static void main(String[] args) throws IOException {
+
+        Socket socket = new Socket("localhost", 7391);
+        System.out.println("Connected to server.");
+
+        BufferedReader socketReader = new BufferedReader(new InputStreamReader(socket.getInputStream()));
+        PrintWriter socketWriter = new PrintWriter(socket.getOutputStream(), true);
+
+        Scanner clientInput = new Scanner(System.in);
+
+        socketWriter.println("HANDSHAKE");
+        // note: Optional
+        if (!socketReader.readLine().startsWith("Logged In"))
+            throw new RuntimeException("Server did not response as expected.");
+
+        System.out.println("Handshake established.");
+
+        String word;
+        while (true) {
+            word = clientInput.nextLine();
+
+            // note: Optional
+            if (word.split("\\s+").length > 1) {
+                throw new RuntimeException("Invalid input");
+            }
+
+            socketWriter.println(word);
+
+            if (word.equalsIgnoreCase("STOP")) {
+                int numberOfUniqueWords;
+                try {
+                    numberOfUniqueWords = Integer.parseInt(socketReader.readLine());
+                } catch (NumberFormatException e) {
+                    // note: Optional
+                    throw new RuntimeException("Server did not return a number for unique words for session.");
+                }
+                if (!socketReader.readLine().equals("LOGGED OUT")) {
+                    // note: Optional
+                    throw new RuntimeException("Server did not return the string LOGGED OUT when terminating session.");
+                }
+                System.out.println();
+                System.out.println("Number of words that server knows of: " + numberOfUniqueWords);
+                if (!socketReader.readLine().equalsIgnoreCase("LOGGED OUT"))
+                    throw new RuntimeException("Invalid input from server");
+                break;
+            } else {
+                String infoAboutWord = socketReader.readLine();
+                // note: Optional
+                if (!(infoAboutWord.equals("IMA") || infoAboutWord.equals("NEMA"))) {
+                    throw new RuntimeException("Server did not return expected response for sent word.");
+                } else {
+                    System.out.println(infoAboutWord);
+                }
+            }
+        }
+
+        socket.close();
+        socketReader.close();
+        socketWriter.close();
+
+        System.out.println("Session terminated.");
+    }
+}
+
+import java.io.IOException;
+import java.net.ServerSocket;
+import java.net.Socket;
+
+public class TcpServer {
+
+    public static void main(String[] args) throws IOException {
+        new TcpServer().run();
+    }
+
+    ServerSocket serverSocket;
+
+    TcpServer() throws IOException {
+        serverSocket = new ServerSocket(7391);
+    }
+
+    public void run() {
+        System.out.println("Server is ready to accept connections!");
+        while(true) {
+            try {
+                Socket client = serverSocket.accept();
+                System.out.println("A new client is connected: " + client.getInetAddress());
+                new Worker(client).start();
+            } catch (IOException e) {
+                throw new RuntimeException(e);
+            }
+        }
+    }
+
+}
